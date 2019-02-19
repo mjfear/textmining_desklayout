@@ -20,9 +20,15 @@ phone_names <- read_csv("data/mdc_phone_list.csv",col_names = TRUE) %>%
   mutate(word_count = str_count(staffName, ptn_separate_word),
          type = if_else(str_detect(staffName, "Room|Library|Centre|Office"), "Room", "Staff")) 
 
-hr_names <- read_csv("data/HRListOfStaff.csv", col_names = TRUE) %>% 
+# hr_names <- read_csv("data/HRListOfStaff.csv", col_names = TRUE) %>% 
+#   rename(staffID_HR = "Staff Member", last = Surname, first = "Pref Name", location = "Pay Location") %>% 
+#   filter(str_detect(location, "1994|2005|Beehive") == TRUE)
+
+hr_allStaff <- read_csv("data/HR_MATT.csv", col_names = TRUE, skip = 17) 
+hr_newStaff <- read_csv("data/HR_NEW.csv", col_names = TRUE, skip = 15)
   rename(staffID_HR = "Staff Member", last = Surname, first = "Pref Name", location = "Pay Location") %>% 
   filter(str_detect(location, "1994|2005|Beehive") == TRUE)
+
 
 # clean_names_staff <- phone_names %>% 
 #   filter(type != "Room") %>% 
@@ -36,7 +42,9 @@ hr_names <- read_csv("data/HRListOfStaff.csv", col_names = TRUE) %>%
 
 clean_names_staff <- hr_names %>% 
   mutate(staffID = row_number(last),
-         staffName= paste(first, last, sep = " ")) %>% 
+         staffName= paste(first, last, sep = " "),
+         first = str_to_upper(first),
+         last = str_to_upper(last)) %>% 
   select(staffID, staffName, first, last) %>% 
   arrange(staffID)
 
@@ -58,6 +66,7 @@ text <- bind_rows(textA, textB) %>%
   slice(str_which(text, pattern = "[:graph:]")) %>% 
   mutate(text = str_replace(text, "\r$",""))
 
+## Break text into question groups
 label_TMgroup <- function(text, pattern, start_group = ""){
   idx <- str_which(text, pattern)
   idx_lead = lead(idx, default = length(text) +1)-1
@@ -71,19 +80,60 @@ label_TMgroup <- function(text, pattern, start_group = ""){
 }
 
 text_grouped <- text %>% 
-  mutate(respondentID = label_TMgroup(text, pattern = ptn_respondent)) %>% 
+  mutate(respondentID = label_TMgroup(text, pattern = ptn_respondent) %>% str_replace("#","") %>% as.integer()) %>% 
   nest(text) %>% 
   mutate(question = data %>% map("text") %>% map(~label_TMgroup(.x, ptn_question, start_group = "I"))) %>% 
   unnest()
-           
+
+
+
+ptn_respondent <- "^#[:digit:]+" #Starts with # followed by one or more digits
+ptn_question <- "^Q[:digit:]+" #Starts with Q followed by one or more digits
+ptn_titleCase_twoword <- "[:upper:][:lower:]+[:space:][:upper:][:lower:]+"
+ptn_titleCase_oneword <- "[:upper:][:lower:]+"
+# ptb_nameCase_oneword <- "[:upper:]+[:lower:]+[:upper:]+[:lower:]+"
+ptn_separate_word <- "[:alpha:]+"
+ptn_separate_word_or_end <- "[:alpha:]+[:space:]|[:alpha:]$"
+
 respondent_names <- text_grouped %>% 
   group_by(doc, respondentID, question) %>% 
   filter(question == "Q1") %>%
   slice(seq(2, length(text)-2, by = 4)) %>% 
-  mutate(text = str_replace(text, "^Name ", "")) %>% 
-  ungroup() %>% 
-  select(doc, respondentID, text) %>% 
-  rename(respondent_name = text)
+  mutate(resp_name = str_replace(text, "^Name ", "") %>% str_trim,
+         resp_first = str_split_fixed(resp_name, "[:space:]", n = 2)[,1] %>% str_to_upper,
+         resp_last = str_split_fixed(resp_name, "[:space:]", n = 2)[,2] %>% str_to_upper) %>% 
+  mutate(n_match_first = str_which(resp_first, str_c("^", clean_names_staff$first, "$")) %>% {length(.)},
+         n_match_last = str_which(resp_last, str_c("^", clean_names_staff$last, "$")) %>% {length(.)},
+         confidence = (1/(n_match_first) + 1/(n_match_last))*0.5) %>% 
+  arrange(n_match_last, n_match_first)
+
+
+  filter(resp_last != "") %>% 
+  filter(n_match_first == 0 | n_match_last == 0)
+  
+  left_join(clean_names_staff, by = c("resp_last" = "last")) %>% 
+  nest(-doc, -respondentID) %>% 
+  mutate(n_group = map(data, "first") %>% map_int(length)) %>% 
+  unnest %>% 
+  filter(n_group == 1 | n_group > 1 & resp_first != first) %>% 
+  filter(resp_last == "" | is.na(staffName) == TRUE)
+
+%>% 
+  unnest
+
+%>% 
+  count()
+
+%>% 
+  filter(is.na(staffID) == TRUE & resp_last == "" & countMatches == 1) %>% 
+  left_join(clean_names_staff, by = c("resp_first" = "first"))
+  # select(doc, respondentID, text) %>% 
+  # rename(respondent_name = text)
+
+test <- respondent_names %>% 
+  count(doc, respondentID)
+count(respondent_names$resp_first, clean_names_staff$first)
+
 
 text_grouped_named <- text_grouped %>% 
   inner_join(respondent_names)
@@ -97,7 +147,9 @@ text_grouped_named_colleagues <- text_grouped_named %>%
   mutate(text = str_replace(text, "Name \\+ reason[:blank:]+",""),
          colleague = str_extract_all(text, ptn_titleCase_twoword),
          resp_name_count = str_count(respondent_name, ptn_separate_word_or_end)) %>% 
-  unnest %>% 
+  unnest 
+
+text_matched_named_colleagues <- text_grouped_named_colleagues %>% 
   filter(resp_name_count > 1) %>% 
   mutate(resp_first = str_extract(respondent_name, str_c(ptn_separate_word_or_end, "[:space:]")) %>% str_trim,
          resp_last = str_extract(respondent_name, str_c(ptn_separate_word, "$")),
@@ -114,7 +166,7 @@ text_grouped_named_colleagues <- text_grouped_named %>%
   inner_join(clean_names_staff, by = c("coll_first" = "first", "coll_last" = "last")) %>% 
   select(doc:resp_ID, coll_name = staffName, coll_first, coll_last, coll_ID = staffID)
 
-staffID_in_survey <- text_grouped_named_colleagues %>% 
+staffID_in_survey <- text_matched_named_colleagues %>% 
   select(resp_ID, coll_ID) %>% 
   flatten_int() %>% 
   unique
@@ -123,7 +175,7 @@ network_vertices <- clean_names_staff %>%
   select(staffID, staffName) %>% 
   filter(staffID %in% staffID_in_survey)
 
-network_edges <- text_grouped_named_colleagues %>% 
+network_edges <- text_matched_named_colleagues %>% 
   select(resp_ID, coll_ID) 
   
 network <- network_edges %>% 
@@ -133,22 +185,7 @@ theme_blank <- theme(axis.title = element_blank(), axis.text = element_blank(),
                      axis.ticks = element_blank(), panel.background = element_blank())
 
 ggraph(network, "nicely") + # "in_circle"
-  geom_edge_link(alpha = 0.2, arrow = arrow(angle = 20, length = unit(0.1, "inches"), type = "closed", ends = "last")) +
+  geom_edge_link(alpha = 0.2) + #arrow = arrow(angle = 20, length = unit(0.1, "inches")), type = "closed", ends = "last" 
   geom_node_point(size = 2) + 
   geom_node_text(aes(label = staffName), repel = TRUE) + 
   theme_blank
-
-
-# mutate(respondendID_lgl = str_detect(respondent_name, ptn_clean_staffName)) 
-# 
-# %>% 
-#   filter(respondendID_lgl == FALSE)
-# 
-# 
-# 
-# 
-# colleague_staffNames <- text_grouped_named_colleagues %>% select(colleague) %>%  unique()
-# 
-# clean_staffNames <- colleague_staffNames %>% 
-#   mutate(count = str_count(colleague, pattern = catch_words_colleagues))
-#   

@@ -5,7 +5,6 @@ library(pdftools)
 library(ggraph)
 
 # String Regex definitions ------------------------------------------------
-
 ptn_respondent <- "^#[:digit:]+" #Starts with # followed by one or more digits
 ptn_question <- "^Q[:digit:]+" #Starts with Q followed by one or more digits
 ptn_titleCase_twoword <- "[:upper:][:lower:]+[:space:][:upper:][:lower:]+"
@@ -16,43 +15,44 @@ ptn_separate_word_or_end <- "[:alpha:]+[:space:]|[:alpha:]$"
 
 # Import and wrangle ------------------------------------------------------
 
-phone_names <- read_csv("data/mdc_phone_list.csv",col_names = TRUE) %>% 
-  mutate(word_count = str_count(staffName, ptn_separate_word),
-         type = if_else(str_detect(staffName, "Room|Library|Centre|Office"), "Room", "Staff")) 
+# phone_names <- read_csv("data/mdc_phone_list.csv",col_names = TRUE) %>% 
+#   mutate(word_count = str_count(staffName, ptn_separate_word),
+#          type = if_else(str_detect(staffName, "Room|Library|Centre|Office"), "Room", "Staff")) 
 
-# hr_names <- read_csv("data/HRListOfStaff.csv", col_names = TRUE) %>% 
-#   rename(staffID_HR = "Staff Member", last = Surname, first = "Pref Name", location = "Pay Location") %>% 
-#   filter(str_detect(location, "1994|2005|Beehive") == TRUE)
-
+hr_names <- read_csv("data/HRListOfStaff.csv", col_names = TRUE) 
 hr_allStaff <- read_csv("data/HR_MATT.csv", col_names = TRUE, skip = 17) 
-hr_newStaff <- read_csv("data/HR_NEW.csv", col_names = TRUE, skip = 15)
-  rename(staffID_HR = "Staff Member", last = Surname, first = "Pref Name", location = "Pay Location") %>% 
-  filter(str_detect(location, "1994|2005|Beehive") == TRUE)
+hr_newStaff <- read_csv("data/HR_NEW.csv", col_names = TRUE, skip = 15) %>% 
+  select(-X9) %>% 
+  slice(which(is.na(`Staff Member`) != TRUE)) %>% 
+  mutate(`Staff Member` = as.integer(`Staff Member`)) %>% 
+  rename(Title = `Position Number`)
 
+# hr_formerStaff <- read_csv("data/HR_TERMIN.csv", col_names = TRUE, skip = 15) %>% 
+#   select(-matches("X")) %>% 
+#   mutate(last = str_split_fixed(str_to_upper(Employee), "[:space:]", n=2)[,1],
+#          payNo = row_number()+10000)
 
-# clean_names_staff <- phone_names %>% 
-#   filter(type != "Room") %>% 
-#   mutate(staffID = row_number(staffName),
-#          first = str_extract(staffName, str_c(ptn_separate_word_or_end, "[:space:]")) %>% str_trim(),
-#          last = str_extract(staffName, str_c(ptn_separate_word, "$"))) %>% 
-#   select(staffID, staffName, first, last) %>% 
-#   arrange(staffID)
+clean_names_staff_full <- hr_allStaff %>% 
+  full_join(hr_names) %>% 
+  full_join(hr_newStaff, by = c("Staff Member", "Pay Location")) %>% 
+  arrange(`Staff Member`) %>% 
+  mutate(predicate = Surname.y %>% is.na,
+         last = if_else(predicate, Surname.x, Surname.y),
+         joined = if_else(predicate, Joined.x, Joined.y),
+         jobTitle = if_else(predicate, Title.x, Title.y),
+         first = if_else(predicate, `Pref Name.x`, `Pref Name.y`)) %>% 
+  select(payNo = `Staff Member`, name = `Staff Member_1`, last, first, jobCode = `Position Number`, jobTitle,
+         council = Council, department = Department, managers = Managers, section = Section,
+         location = `Pay Location`, jobStart = `Position Start`, country = `Country Born`,
+         everything(), -matches("\\.x|\\.y"), - predicate, -Status, -`Employment Status`) 
 
-## or
-
-clean_names_staff <- hr_names %>% 
-  mutate(staffID = row_number(last),
-         staffName= paste(first, last, sep = " "),
-         first = str_to_upper(first),
+clean_names_staff <- clean_names_staff_full %>% 
+  filter(str_detect(location, "1994|2005|Beehive") == TRUE) %>% 
+  mutate(first = str_to_upper(first),
          last = str_to_upper(last)) %>% 
-  select(staffID, staffName, first, last) %>% 
-  arrange(staffID)
+  arrange(department, managers, section) 
 
-# mdc_names <- phone_names$X1[seq(1, nrow(phone_names), 2)]
-# mdc_phone <- phone_names$X1[seq(2, nrow(phone_names), 2)] %>% as.numeric()
-# phone_names_tidy <-  tibble(phone = mdc_phone, name = mdc_names) %>% 
-#   mutate(wordcount = str_count(name, ptn_titleCase_oneword) + 1) 
-
+clean_names_staff_summary <- clean_names_staff %>% map_df(n_distinct) 
 
 textA <- pdf_text("data/staffresponses1.pdf") %>% {tibble(doc = "A", page = .)} 
 textB <- pdf_text("data/staffresponses2.pdf") %>% {tibble(doc = "B", page = .)} 
@@ -85,17 +85,7 @@ text_grouped <- text %>%
   mutate(question = data %>% map("text") %>% map(~label_TMgroup(.x, ptn_question, start_group = "I"))) %>% 
   unnest()
 
-
-
-ptn_respondent <- "^#[:digit:]+" #Starts with # followed by one or more digits
-ptn_question <- "^Q[:digit:]+" #Starts with Q followed by one or more digits
-ptn_titleCase_twoword <- "[:upper:][:lower:]+[:space:][:upper:][:lower:]+"
-ptn_titleCase_oneword <- "[:upper:][:lower:]+"
-# ptb_nameCase_oneword <- "[:upper:]+[:lower:]+[:upper:]+[:lower:]+"
-ptn_separate_word <- "[:alpha:]+"
-ptn_separate_word_or_end <- "[:alpha:]+[:space:]|[:alpha:]$"
-
-respondent_names <- text_grouped %>% 
+respondent_names_full <- text_grouped %>% 
   group_by(doc, respondentID, question) %>% 
   filter(question == "Q1") %>%
   slice(seq(2, length(text)-2, by = 4)) %>% 
@@ -105,56 +95,90 @@ respondent_names <- text_grouped %>%
   mutate(n_match_first = str_which(resp_first, str_c("^", clean_names_staff$first, "$")) %>% {length(.)},
          n_match_last = str_which(resp_last, str_c("^", clean_names_staff$last, "$")) %>% {length(.)},
          confidence = (1/(n_match_first) + 1/(n_match_last))*0.5) %>% 
-  arrange(n_match_last, n_match_first)
+  arrange(doc, respondentID) %>% 
+  filter(n_match_first + n_match_last > 0) #bin responses for which cannot find any matches in first or last name
 
+respondent_names_last <- respondent_names_full %>% 
+  inner_join(clean_names_staff, by = c("resp_last" = "last")) %>% 
+  group_by(doc, respondentID) %>% 
+  mutate(matches = n()) %>% 
+  select(matches, everything()) %>% arrange(doc, respondentID) %>% 
+  filter(n_match_last == 1 | first == resp_first)
 
-  filter(resp_last != "") %>% 
-  filter(n_match_first == 0 | n_match_last == 0)
+respondent_names_first <- respondent_names_full %>% 
+  anti_join(respondent_names_last) %>% 
+  inner_join(clean_names_staff, by = c("resp_first" = "first")) %>% 
+  group_by(doc, respondentID) %>% 
+  mutate(matches = n()) %>% 
+  select(matches, everything()) %>% arrange(doc, respondentID) %>% 
+  filter(n_match_first == 1 | resp_last != "" & resp_last == last) 
   
-  left_join(clean_names_staff, by = c("resp_last" = "last")) %>% 
-  nest(-doc, -respondentID) %>% 
-  mutate(n_group = map(data, "first") %>% map_int(length)) %>% 
-  unnest %>% 
-  filter(n_group == 1 | n_group > 1 & resp_first != first) %>% 
-  filter(resp_last == "" | is.na(staffName) == TRUE)
+respondent_names_unknown <- respondent_names_full %>% 
+  anti_join(respondent_names_last) %>% 
+  anti_join(respondent_names_first) 
 
-%>% 
-  unnest
+respondent_names_known <- respondent_names_last %>% 
+  bind_rows(respondent_names_first)
+#   left_join(clean_names_staff, by = c("resp_last" = "last")) %>% 
+#   nest(-doc, -respondentID) %>% 
+#   mutate(n_group = map(data, "first") %>% map_int(length)) %>% 
+#   unnest %>% 
+#   filter(n_group == 1 | n_group > 1 & resp_first != first) %>% 
+#   filter(resp_last == "" | is.na(staffName) == TRUE)
+# 
+# %>% 
+#   unnest
+# 
+# %>% 
+#   count()
+# 
+# %>% 
+#   filter(is.na(staffID) == TRUE & resp_last == "" & countMatches == 1) %>% 
+#   left_join(clean_names_staff, by = c("resp_first" = "first"))
+#   # select(doc, respondentID, text) %>% 
+#   # rename(respondent_name = text)
 
-%>% 
-  count()
-
-%>% 
-  filter(is.na(staffID) == TRUE & resp_last == "" & countMatches == 1) %>% 
-  left_join(clean_names_staff, by = c("resp_first" = "first"))
-  # select(doc, respondentID, text) %>% 
-  # rename(respondent_name = text)
-
-test <- respondent_names %>% 
-  count(doc, respondentID)
-count(respondent_names$resp_first, clean_names_staff$first)
+# test <- respondent_names %>% 
+#   count(doc, respondentID)
+# count(respondent_names$resp_first, clean_names_staff$first)
 
 
-text_grouped_named <- text_grouped %>% 
-  inner_join(respondent_names)
+text_grouped_named <- respondent_names_known %>% 
+  select(doc:respondentID, resp_name:resp_last, resp_payNo = payNo) %>% 
+  inner_join(text_grouped) 
+  
+  # text_grouped %>% 
+  # inner_join(respondent_names_known, by = c("doc", "respondentID"))
+  # 
 
 ptn_clean_first_staffName <- str_c(clean_names_staff$first %>% str_replace_na("NA"), collapse = "|")
 ptn_clean_last_staffName <- str_c(clean_names_staff$last, collapse = "|")
+ptn_clean_both_staffName <- str_c(ptn_clean_last_staffName, ptn_clean_first_staffName, sep = "|"))
   
-text_grouped_named_colleagues <- text_grouped_named %>% 
-  filter(question == "Q4") %>% 
+text_grouped_named_colleagues <- text_grouped_named %>%
+  filter(question == "Q4") %>%
   slice(c(-str_which(text, "^Page 4"), -str_which(text, "^Q4"))) %>% 
+  mutate(text_upper = toupper(text),
+         match_clean_word = str_detect(str_to_upper(text), )
+  
+
+%>%
   mutate(text = str_replace(text, "Name \\+ reason[:blank:]+",""),
-         colleague = str_extract_all(text, ptn_titleCase_twoword),
-         resp_name_count = str_count(respondent_name, ptn_separate_word_or_end)) %>% 
+         coll_name = str_extract_all(text, ptn_titleCase_twoword) %>% str_trim()
+         # resp_name_count = str_count(resp_name, ptn_separate_word_or_end)
+         ) %>%
   unnest 
 
+%>% 
+  mutate(coll_first = str_split_fixed(coll_name, "[:space:]", n = 2)[,1] %>% str_to_upper(),
+         coll_last = str_split_fixed(coll_name, "[:space:]", n = 2)[,2] %>% str_to_upper())
+
 text_matched_named_colleagues <- text_grouped_named_colleagues %>% 
-  filter(resp_name_count > 1) %>% 
-  mutate(resp_first = str_extract(respondent_name, str_c(ptn_separate_word_or_end, "[:space:]")) %>% str_trim,
-         resp_last = str_extract(respondent_name, str_c(ptn_separate_word, "$")),
-         resp_count_first = str_count(resp_first, ptn_clean_first_staffName),
-         resp_count_last = str_count(resp_last, ptn_clean_last_staffName),
+  # filter(resp_name_count > 1) %>% 
+  mutate(#resp_first = str_extract(respondent_name, str_c(ptn_separate_word_or_end, "[:space:]")) %>% str_trim,
+         #resp_last = str_extract(respondent_name, str_c(ptn_separate_word, "$")),
+         #resp_count_first = str_count(resp_first, ptn_clean_first_staffName),
+         #resp_count_last = str_count(resp_last, ptn_clean_last_staffName),
          coll_first = str_extract(colleague, str_c(ptn_separate_word_or_end, "[:space:]")) %>% str_trim,
          coll_last = str_extract(colleague, str_c(ptn_separate_word, "$")),
          coll_count_first = str_count(coll_first, ptn_clean_first_staffName),
